@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>Leitor de Conversas WhatsApp (ZIP)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<style>
+  body { font-family: Arial, sans-serif; background: #ece5dd; margin: 0; padding: 0; display: flex; justify-content: center; }
+  #app { width: 100%; max-width: 420px; min-height: 100vh; background: #ece5dd; display: flex; flex-direction: column; border-left: 1px solid #ccc; border-right: 1px solid #ccc; }
+  header { padding: 10px; background: #075e54; color: white; text-align: center; }
+  header h1 { font-size: 18px; margin: 0 0 8px; }
+  header .controls { display: flex; flex-direction: column; gap: 6px; align-items: center; }
+  header input[type=file] { padding: 6px; background: #fff; border: 1px solid #ccc; border-radius: 4px; }
+  #chat { flex: 1; padding: 10px; display: flex; flex-direction: column; }
+
+  .dia { display: flex; align-items: center; gap: 8px; margin: 12px 0; }
+  .dia::before, .dia::after { content:""; height:1px; background: #ccc; flex:1; }
+  .dia span { background: #d4f8c4; color: #4a4a4a; padding: 4px 10px; border-radius: 10px; font-size: 12px; }
+
+  .msg { max-width: 80%; padding: 8px 12px; border-radius: 8px; margin: 4px 0; word-wrap: break-word; box-shadow: 0 1px 0 rgba(0,0,0,.1); }
+  .esq { background: #fff; align-self: flex-start; }
+  .dir { background: #dcf8c6; align-self: flex-end; }
+  .nome { font-weight: bold; font-size: 0.85em; margin-bottom: 4px; color: #075e54; }
+  .texto { margin-top: 4px; white-space: pre-wrap; }
+  .rodape { font-size: 0.7em; color: #666; text-align: right; margin-top: 4px; }
+
+  .midia { margin-top: 6px; }
+  .midia img, .midia video { width: 100%; max-width: 280px; border-radius: 6px; display: block; }
+  .midia audio { width: 100%; max-width: none; display: block; }
+  .audio-full, .video-full { max-width: 100%; align-self: stretch; }
+  .audio-full audio, .video-full video { width: 100%; max-width: none; display: block; }
+
+  .placeholder { background: #f0f0f0; border: 1px dashed #ccc; border-radius: 6px; padding: 10px; font-size: 0.8em; color: #666; }
+  .sistema { text-align: center; color: #666; font-size: 20px; margin: 30px 0; padding-right: 70px; padding-left: 70px; }
+
+#drop-overlay {
+  position: fixed;
+  top: 0; left: 0;
+  width: 100vw;
+  height: 100vh;
+  background: rgba(0, 0, 0, 0.7);
+  color: white;
+  font-size: 1.8em;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  z-index: 9999;
+}
+
+#drop-text {
+  max-width: 90%;
+  padding: 20px;
+}
+
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+
+    <h1>Leitor de Conversas WhatsApp</h1>
+<div id="drop-overlay">
+  <div id="drop-text">Arraste o arquivo aqui. A tela inteira pode ser usada para soltar o arquivo.</div>
+</div>
+    <div class="controls">
+      <input type="file" id="fileInput" accept=".txt,.zip">
+      <label><input type="checkbox" id="agruparDias" checked> Agrupar por data</label>
+    </div>
+  </header>
+  <div id="chat"></div>
+</div>
+
+<script>
+/* ===== Config ===== */
+const MEUS_IDS = ["Jackson Ullmann", "+55 47 99962-8989"];
+const IMAGE_EXTS = ["jpg","jpeg","png","gif","webp"];
+const VIDEO_EXTS = ["mp4","mov","m4v","avi","webm"];
+const AUDIO_EXTS = ["mp3","m4a","opus","ogg","wav"];
+
+/* Armazena nomeBase -> blobURL para mídias extraídas do ZIP */
+let midiaMap = new Map();
+/* Para liberar URLs antigos ao importar novo arquivo */
+let objectUrls = [];
+
+/* ===== Utils ===== */
+function normNome(s){ return (s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim(); }
+function soDigitos(s){ return (s||"").replace(/\D+/g,""); }
+const IDS_NORMALIZADOS = MEUS_IDS.map(v => ({ nome: normNome(v), fone: soDigitos(v) }));
+function ehMeu(nome){
+  const n = normNome(nome);
+  const d = soDigitos(nome);
+  return IDS_NORMALIZADOS.some(id => (id.nome && n.includes(id.nome)) || (id.fone && d.includes(id.fone)));
+}
+function pad2(n){ return n.toString().padStart(2,"0"); }
+function keyData(dia, mes, ano){
+  const a = (ano && ano.length === 2) ? "20"+ano : ano;
+  return `${pad2(+dia)}/${pad2(+mes)}/${a}`;
+}
+function basename(path){ return String(path||"").split("/").pop(); }
+
+/* ===== Regex ===== */
+const PAT_BRACKETS = /^\[(\d{1,2})\/(\d{1,2})\/(\d{2,4}),\s*(\d{1,2}:\d{2})\]\s([^:]+):\s?(.*)$/;
+const PAT_HIFEN    = /^(\d{1,2})\/(\d{1,2})\/(\d{2,4}),?\s*(\d{1,2}:\d{2})\s-\s([^:]+):\s?(.*)$/;
+const PAT_HORA_NOME = /^(\d{1,2}:\d{2})\s([^:]+?)\s(.*)$/;
+
+/* ===== Marcadores de mídia omitida ===== */
+function temMarcadorMidiaOculta(txt) {
+  if (!txt) return false;
+  const s = txt.toLowerCase();
+  return [
+    "imagem ocultada", "imagem omitida", "imagem não exportada",
+    "vídeo omitido", "vídeo ocultado", "vídeo não exportado",
+    "áudio omitido", "audio omitido", "arquivo de mídia oculto",
+    "sticker omitido", "figurinha omitida"
+  ].some(k => s.includes(k));
+}
+
+/* ===== Parser ===== */
+function parseTxt(conteudo){
+  const linhas = String(conteudo||"").split(/\r?\n/);
+  const msgs = [];
+  let dataAtual = null;
+
+  for (const linha of linhas){
+    const l = linha.trim();
+    if (!l) continue;
+
+    // Linha só com data (dd/mm/aaaa)
+    if (/^\d{1,2}\/\d{1,2}\/\d{2,4}$/.test(l)) {
+      dataAtual = l;
+      continue;
+    }
+
+    let m;
+    if ((m = l.match(PAT_BRACKETS)) || (m = l.match(PAT_HIFEN))) {
+      const dd = m[1], mm = m[2], aa = m[3], hora = m[4], nome = m[5], texto = m[6] || "";
+      dataAtual = keyData(dd,mm,aa);
+      msgs.push({ data: dataAtual, hora, nome: nome.trim(), texto });
+    }
+    else if ((m = l.match(PAT_HORA_NOME))) {
+      const hora = m[1], nome = m[2], texto = m[3] || "";
+      msgs.push({ data: dataAtual, hora, nome: nome.trim(), texto });
+    }
+    else if (msgs.length > 0) {
+      // Continuação de mensagem anterior (quebra de linha)
+      msgs[msgs.length - 1].texto += "\n" + l;
+    }
+  }
+  return msgs;
+}
+
+/* ===== Mídias ===== */
+function extrairArquivos(txt) {
+  const out = [];
+  if (!txt) return out;
+
+  // Captura nomes tipo "<anexado: algo.ext>" e também "algo.ext" no texto
+  const allExts = [...IMAGE_EXTS, ...VIDEO_EXTS, ...AUDIO_EXTS].map(e => e.replace('.', '\\.')).join("|");
+  const reAng = new RegExp(`anexado:\\s*([^<>\\n]+\\.(${allExts}))`, "gi");
+  let m;
+  while ((m = reAng.exec(txt)) !== null) {
+    out.push(basename(m[1].trim()));
+  }
+  const rePlain = new RegExp(`([\\w\\-()\\s\\u00C0-\\u017F]+)\\.(${allExts})`, "gi");
+  while ((m = rePlain.exec(txt)) !== null) {
+    out.push(`${m[1].trim()}.${m[2].toLowerCase()}`);
+  }
+
+  // Remove duplicados preservando ordem
+  return Array.from(new Set(out));
+}
+
+function criarMidias(msgElem, fileName) {
+  const midias = [];
+  const clean = basename(fileName || "");
+  if (!clean) return midias;
+
+  const dot = clean.lastIndexOf(".");
+  const ext = dot >= 0 ? clean.slice(dot+1).toLowerCase() : "";
+  const src = midiaMap.get(clean) || clean; // tenta pelo ZIP; senão, fica nome puro (caso sirva localmente)
+
+  if (AUDIO_EXTS.includes(ext)) {
+    const aud = document.createElement("audio");
+    aud.controls = true; aud.preload = "metadata"; aud.src = src;
+    midias.push(aud); msgElem.classList.add("audio-full");
+  } else if (VIDEO_EXTS.includes(ext)) {
+    const vid = document.createElement("video");
+    vid.controls = true; vid.preload = "metadata"; vid.src = src;
+    midias.push(vid); msgElem.classList.add("video-full");
+  } else if (IMAGE_EXTS.includes(ext)) {
+    const img = document.createElement("img");
+    img.loading = "lazy"; img.decoding = "async"; img.src = src;
+    midias.push(img);
+  }
+  return midias;
+}
+
+/* ===== Render ===== */
+let msgsCache = [];
+
+function criarMsgElement(m) {
+  const msg = document.createElement("div");
+  msg.className = "msg " + (ehMeu(m.nome) ? "dir" : "esq");
+
+  const nome = document.createElement("div");
+  nome.className = "nome";
+  nome.textContent = m.nome;
+  msg.appendChild(nome);
+
+  const texto = document.createElement("div");
+  texto.className = "texto";
+  texto.textContent = (m.texto || "").trim();
+  msg.appendChild(texto);
+
+  const arquivos = extrairArquivos(m.texto);
+  if (arquivos.length > 0 || temMarcadorMidiaOculta(m.texto)) {
+    const contMidia = document.createElement("div");
+    contMidia.className = "midia";
+
+    if (arquivos.length > 0) {
+      for (const file of arquivos) {
+        const elems = criarMidias(msg, file);
+        elems.forEach(el => contMidia.appendChild(el));
+      }
+    } else {
+      const ph = document.createElement("div");
+      ph.className = "placeholder";
+      ph.textContent = "Mídia mencionada/ocultada. Se estiver no ZIP, será exibida automaticamente.";
+      contMidia.appendChild(ph);
+    }
+    msg.appendChild(contMidia);
+  }
+
+  const rod = document.createElement("div");
+  rod.className = "rodape";
+  rod.textContent = m.hora || "";
+  msg.appendChild(rod);
+
+  return msg;
+}
+
+function render(msgs, agruparDias){
+  const chat = document.getElementById("chat");
+  chat.innerHTML = "";
+
+  if (!msgs || msgs.length === 0) {
+    const vazio = document.createElement("div");
+    vazio.className = "sistema";
+    vazio.textContent = "Arraste um arquivo .zip aqui ou uso o botão acima!";
+    chat.appendChild(vazio);
+    return;
+  }
+
+  let diaAtual = null;
+  for (const m of msgs){
+    if (agruparDias && m.data && m.data !== diaAtual){
+      diaAtual = m.data;
+      const d = document.createElement("div");
+      d.className = "dia";
+      const s = document.createElement("span");
+      s.textContent = diaAtual;
+      d.appendChild(s);
+      chat.appendChild(d);
+    }
+    chat.appendChild(criarMsgElement(m));
+  }
+}
+/* ===== Importação de arquivo (.zip ou .txt) ===== */
+const fileInput = document.getElementById("fileInput");
+const agruparDias = document.getElementById("agruparDias");
+
+function limparUrlsAntigas(){
+  for (const u of objectUrls) {
+    try { URL.revokeObjectURL(u); } catch {}
+  }
+  objectUrls = [];
+}
+
+fileInput.addEventListener("change", async (e) => {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+
+  // Limpa URLs antigas antes de carregar novo pacote
+  midiaMap.clear();
+  limparUrlsAntigas();
+
+  // .zip com chat + mídias
+  if (file.name.toLowerCase().endsWith(".zip")) {
+    try {
+      const zip = await JSZip.loadAsync(file);
+
+      // Escolhe o .txt: preferir "chat.txt"; senão, primeiro .txt encontrado
+      let chatEntry = null;
+      for (const [path, entry] of Object.entries(zip.files)) {
+        if (entry.dir) continue;
+        const base = basename(path);
+        if (base.toLowerCase() === "chat.txt") { chatEntry = entry; break; }
+      }
+      if (!chatEntry) {
+        for (const [path, entry] of Object.entries(zip.files)) {
+          if (entry.dir) continue;
+          if (path.toLowerCase().endsWith(".txt")) { chatEntry = entry; break; }
+        }
+      }
+      if (!chatEntry) {
+        alert("Nenhum chat.txt encontrado no ZIP.");
+        render([], true);
+        return;
+      }
+
+      // Carrega texto do chat
+      const chatTxt = await chatEntry.async("string");
+
+      // Cria URLs temporárias para as mídias (indexadas por nome base)
+      for (const [path, entry] of Object.entries(zip.files)) {
+        if (entry.dir) continue;
+        const base = basename(path);
+        if (base.toLowerCase() === basename(chatEntry.name).toLowerCase()) continue;
+
+        // Só indexa extensões conhecidas (imagem, vídeo, áudio). Outras ignoramos.
+        const ext = (base.split(".").pop() || "").toLowerCase();
+        const known = IMAGE_EXTS.includes(ext) || VIDEO_EXTS.includes(ext) || AUDIO_EXTS.includes(ext);
+        if (!known) continue;
+
+        const blob = await entry.async("blob");
+        const url = URL.createObjectURL(blob);
+        objectUrls.push(url);
+        midiaMap.set(base, url);
+      }
+
+      // Parseia e renderiza
+      msgsCache = parseTxt(chatTxt);
+      render(msgsCache, agruparDias.checked);
+    } catch (err) {
+      alert("Falha ao abrir o ZIP: " + (err && err.message ? err.message : err));
+      render([], true);
+    }
+    return;
+  }
+
+  // .txt simples
+  if (file.name.toLowerCase().endsWith(".txt")) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        msgsCache = parseTxt(String(reader.result || ""));
+        render(msgsCache, agruparDias.checked);
+      } catch (err) {
+        alert("Falha ao ler o .txt: " + (err && err.message ? err.message : err));
+        render([], true);
+      }
+    };
+    reader.onerror = () => alert("Erro ao abrir o .txt.");
+    reader.readAsText(file, "utf-8");
+    return;
+  }
+
+  alert("Selecione um arquivo .zip (recomendado) ou .txt.");
+  render([], true);
+});
+
+agruparDias.addEventListener("change", () => {
+  render(msgsCache, agruparDias.checked);
+});
+
+/* Inicial */
+render([], true);
+
+const dropOverlay = document.getElementById('drop-overlay');
+let dragCounter = 0;
+
+window.addEventListener('dragenter', (e) => {
+  e.preventDefault();
+  dragCounter++;
+  dropOverlay.style.display = 'flex';
+});
+
+window.addEventListener('dragover', (e) => {
+  e.preventDefault();
+});
+
+window.addEventListener('dragleave', (e) => {
+  dragCounter--;
+  if (dragCounter === 0) {
+    dropOverlay.style.display = 'none';
+  }
+});
+
+window.addEventListener('drop', (e) => {
+  e.preventDefault();
+  dragCounter = 0;
+  dropOverlay.style.display = 'none';
+
+  const files = e.dataTransfer.files;
+  if (files.length === 0) return;
+
+  const zipFile = files[0];
+  if (!zipFile.name.endsWith('.zip')) {
+    alert('Por favor, envie um arquivo .zip');
+    return;
+  }
+
+  document.getElementById("fileInput").files = e.dataTransfer.files;
+  document.getElementById("fileInput").dispatchEvent(new Event("change"));
+});
+
+
+
+</script>
+</body>
+</html>
