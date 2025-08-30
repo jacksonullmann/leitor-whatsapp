@@ -73,6 +73,7 @@
 </div>
 
 <script>
+
 /* ===== Config ===== */
 const MEUS_IDS = ["Jackson Ullmann", "+55 47 99962-8989"];
 const IMAGE_EXTS = ["jpg","jpeg","png","gif","webp"];
@@ -101,7 +102,7 @@ function keyData(dia, mes, ano){
 function basename(path){ return String(path||"").split("/").pop(); }
 
 /* ===== Regex ===== */
-const PAT_BRACKETS = /^\[(\d{1,2})\/(\d{1,2})\/(\d{2,4}),\s*(\d{1,2}:\d{2})\]\s([^:]+):\s?(.*)$/;
+const PAT_BRACKETS = /^\s*\[(\d{1,2})\/(\d{1,2})\/(\d{2,4}),\s*(\d{1,2}:\d{2}(?::\d{2})?)\]\s([^:]+):\s?(.*)$/;
 const PAT_HIFEN    = /^(\d{1,2})\/(\d{1,2})\/(\d{2,4}),?\s*(\d{1,2}:\d{2})\s-\s([^:]+):\s?(.*)$/;
 const PAT_HORA_NOME = /^(\d{1,2}:\d{2})\s([^:]+?)\s(.*)$/;
 
